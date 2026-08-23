@@ -32,6 +32,8 @@
 /**
  * .num-tabular / .tabular-nums / .amount / [data-amount]
  * Prevent digit-width wobble in money, percentage, and score columns.
+ * RepayPage preset percentages (25/50/75%) now use <span class="num-tabular">
+ * inside .rp-preset-btn so preset digits align with surrounding amounts (#816).
  */
 .num-tabular,
 .tabular-nums,

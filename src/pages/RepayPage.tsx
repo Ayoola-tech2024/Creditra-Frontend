@@ -457,7 +457,7 @@ export default function RepayPage() {
                             MAX <KbdHint keys={['M']} />
                           </span>
                         ) : (
-                          `${pct}%`
+                          <span className="num-tabular">{pct}%</span>
                         )}
                       </button>
                     ))}
