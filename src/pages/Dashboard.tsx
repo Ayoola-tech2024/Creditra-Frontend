@@ -37,6 +37,7 @@ import { LiveRegion } from "../components/LiveRegion";
 import { useReducedMotion } from "../context/ReducedMotionContext";
 import { HealthTipsPanel } from "../components/HealthTipsPanel";
 import { SyncIndicator } from "@/components/SyncIndicator";
+import { StickyActionBar } from "../components/StickyActionBar";
 
 export { RiskGauge };
 
@@ -1104,6 +1105,8 @@ export function Dashboard() {
         onClose={() => setIsExplainOpen(false)}
         triggerRef={explainTriggerRef}
       />
+
+      <StickyActionBar hasLines={hasLines} hasUtilized={hasUtilized} />
     </div>
   );
 }
