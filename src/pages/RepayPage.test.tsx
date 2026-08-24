@@ -17,6 +17,29 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import RepayPage from './RepayPage';
+import { MOCK_CREDIT_LINES } from '../data/mockData';
+import { repaymentStore } from '@/state/repaymentOperations';
+
+// Issue #922: repayments now settle ASYNCHRONOUSLY through the optimistic
+// store + settlement service. Tests settle instantly via delayMs: 0 so the
+// success-step assertions below can flush deterministically.
+vi.mock('@/services/repaymentService', async () => {
+  const actual = await vi.importActual<
+    typeof import('@/services/repaymentService')
+  >('@/services/repaymentService');
+  return {
+    ...actual,
+    submitRepayment: (
+      req: Parameters<typeof actual.submitRepayment>[0],
+    ) => actual.submitRepayment(req, { delayMs: 0 }),
+  };
+});
+
+// The repayment store is a singleton; reset it to pristine seed data before
+// every test so settled repayments in one test never leak into another.
+beforeEach(() => {
+  repaymentStore.reset(MOCK_CREDIT_LINES);
+});
 
 // ── Module mocks ─────────────────────────────────────────────────────────
 
@@ -297,7 +320,7 @@ describe('RepayPage — tabular-nums on numeric displays (FWC26)', () => {
       }
     });
 
-    it('success: remaining debt should carry num-tabular class', () => {
+    it('success: remaining debt should carry num-tabular class', async () => {
       const { container } = renderWithLine();
 
       const input = container.querySelector(
@@ -312,6 +335,15 @@ describe('RepayPage — tabular-nums on numeric displays (FWC26)', () => {
         const confirmBtn = screen.queryByText(/Confirm Repayment/i);
         if (confirmBtn && !confirmBtn.hasAttribute('disabled')) {
           fireEvent.click(confirmBtn);
+          // Settlement is asynchronous now — flush whichever timer mode is
+          // active so the instant-settled promise resolves inside act.
+          await act(async () => {
+            if (vi.isFakeTimers()) {
+              await vi.advanceTimersByTimeAsync(10);
+            } else {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+          });
 
           const successDebt = container.querySelector(
             '.bg-surface.p-4.text-left .num-tabular',

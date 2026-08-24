@@ -2,6 +2,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import RepayPage from '../RepayPage';
+import { MOCK_CREDIT_LINES } from '../../data/mockData';
+import { repaymentStore } from '@/state/repaymentOperations';
+
+// Issue #922: repayments now settle ASYNCHRONOUSLY through the optimistic
+// store + settlement service. Tests settle instantly via delayMs: 0 so the
+// success-step assertions below can flush deterministically.
+vi.mock('@/services/repaymentService', async () => {
+  const actual = await vi.importActual<
+    typeof import('@/services/repaymentService')
+  >('@/services/repaymentService');
+  return {
+    ...actual,
+    submitRepayment: (
+      req: Parameters<typeof actual.submitRepayment>[0],
+    ) => actual.submitRepayment(req, { delayMs: 0 }),
+  };
+});
 
 vi.mock('@/data/mockData', () => ({
   MOCK_CREDIT_LINES: [
@@ -23,6 +40,12 @@ vi.mock('@/data/mockData', () => ({
     },
   ],
 }));
+
+// The repayment store is a singleton; reset it to pristine seed data before
+// every test so settled repayments in one test never leak into another.
+beforeEach(() => {
+  repaymentStore.reset(MOCK_CREDIT_LINES);
+});
 
 function renderPage(initialEntries = ['/repay'], advanceTimers = true) {
   const result = render(
@@ -224,12 +247,16 @@ describe('RepayPage', () => {
       expect(helpBtn.classList.contains('focus-visible:outline-blue-400')).toBe(false);
     });
 
-    it('applies focus-visible classes and rp-* classes on success step buttons', () => {
+    it('applies focus-visible classes and rp-* classes on success step buttons', async () => {
       renderPage(['/repay?line=CL-2024-001']);
       // Navigate to success step
       fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
       fireEvent.click(screen.getByRole('button', { name: /review repayment/i }));
       fireEvent.click(screen.getByRole('button', { name: /confirm repayment/i }));
+      // Settlement is asynchronous now — flush the instant-settled promise.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
 
       const dashboardBtn = screen.getByRole('button', { name: /back to dashboard/i });
       expect(dashboardBtn).toHaveClass('focus-visible:outline');
@@ -299,11 +326,14 @@ describe('RepayPage — copy-to-clipboard buttons (FWC26)', () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith('$3,200.00');
   });
 
-  it('renders copy button for remaining debt on success step', () => {
+  it('renders copy button for remaining debt on success step', async () => {
     renderPage(['/repay?line=CL-2024-001']);
     fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
     fireEvent.click(screen.getByRole('button', { name: /review repayment/i }));
     fireEvent.click(screen.getByRole('button', { name: /confirm repayment/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
     expect(
       screen.getByRole('button', { name: /copy remaining debt amount/i }),
     ).toBeInTheDocument();
@@ -314,6 +344,9 @@ describe('RepayPage — copy-to-clipboard buttons (FWC26)', () => {
     fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
     fireEvent.click(screen.getByRole('button', { name: /review repayment/i }));
     fireEvent.click(screen.getByRole('button', { name: /confirm repayment/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
     const btn = screen.getByRole('button', { name: /copy remaining debt amount/i });
     await act(async () => {
       fireEvent.click(btn);

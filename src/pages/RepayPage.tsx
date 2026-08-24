@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertCircle, AlertTriangle, CheckCircle, Info, ArrowLeft } from 'lucide-react';
 import { Skeleton } from '@/components/Skeleton';
@@ -24,7 +24,12 @@ import {
 import { KbdHint } from '@/components/KbdHint';
 import { RepayPreviewModal } from '@/components/RepayPreviewModal';
 import { CopyToClipboard } from '@/components/CopyToClipboard';
-import { MOCK_CREDIT_LINES } from '@/data/mockData';
+import { repaymentStore } from '@/state/repaymentOperations';
+import {
+  submitRepayment,
+  RepaymentRejectedError,
+  type RepaymentRejectionCode,
+} from '@/services/repaymentService';
 import { motionClasses, useReducedMotion } from '@/context/ReducedMotionContext';
 import './RepayPage.css';
 
@@ -74,6 +79,20 @@ const SEVERITY_CONFIG = {
 } as const;
 
 /**
+ * User-facing copy for settlement rejections. Keyed by the typed rejection
+ * codes from the repayment service; unknown codes fall back to a generic
+ * message. Every failure rolls the optimistic balance back exactly once via
+ * `repaymentStore.failRepayment` before this banner is shown.
+ */
+const SUBMIT_ERROR_MESSAGES: Record<RepaymentRejectionCode | 'unknown', string> = {
+  wallet_rejected: 'The wallet request was rejected.',
+  insufficient_funds: 'Insufficient wallet balance for this repayment.',
+  network_error: 'Network error while submitting the transaction.',
+  timeout: 'The transaction timed out before confirmation.',
+  unknown: 'The repayment could not be completed.',
+};
+
+/**
  * RepayPage — reduced-motion strategy
  *
  * All CSS transitions are neutralised globally by the
@@ -104,14 +123,29 @@ export default function RepayPage() {
   const previewTriggerRef = useRef<HTMLButtonElement>(null);
   const { isReducedMotionActive } = useReducedMotion();
 
+  // Issue #922: credit lines come from the optimistic-repayment store so the
+  // page reflects in-flight repayments and exact rollbacks. The store is
+  // seeded from MOCK_CREDIT_LINES at module load; when the real API lands,
+  // only this store's seed/fetch changes.
+  const allLines = useSyncExternalStore(repaymentStore.subscribe, repaymentStore.getLines);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  // Authoritative post-settlement balance from the receipt. Once set it wins
+  // over local arithmetic, which would otherwise subtract the amount a second
+  // time now that the store balance already reflects the settled repayment.
+  const [authoritativeDebt, setAuthoritativeDebt] = useState<number | null>(
+    null,
+  );
+  const isSubmittingRef = useRef(false);
+
   const creditLines = useMemo(
-    () => MOCK_CREDIT_LINES.filter((cl) => cl.status === 'Active' && cl.utilized > 0),
-    [],
+    () => allLines.filter((cl) => cl.status === 'Active' && cl.utilized > 0),
+    [allLines],
   );
 
   const selectedLine = useMemo(
-    () => MOCK_CREDIT_LINES.find((cl) => cl.id === selectedId) ?? null,
-    [selectedId],
+    () => allLines.find((cl) => cl.id === selectedId) ?? null,
+    [allLines, selectedId],
   );
 
   const walletBalance = 50000;
@@ -169,28 +203,76 @@ export default function RepayPage() {
     }
   };
 
-  const handleConfirm = () => {
-    navigate('/repay/success', {
-      state: {
+  /**
+   * Issue #922 — optimistic repayment with exactly-once rollback.
+   *
+   * 1. `beginRepayment` registers a distinct operation (unique opId) and
+   *    optimistically reduces the balance.
+   * 2. The settlement service resolves with an AUTHORITATIVE receipt →
+   *    `confirmRepayment` reconciles server-canonical values, then navigates
+   *    to the success screen using those values.
+   * 3. On rejection/failure → `failRepayment` rolls the balance back exactly
+   *    once (guarded by the store's terminal-state machine), an error banner
+   *    explains what happened, and the user stays on the review step to retry.
+   * A stale/duplicate confirmation can never overwrite a newer operation's
+   * state — the store supersedes late responses automatically.
+   */
+  const handleConfirm = async () => {
+    if (!selectedLine || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    const op = repaymentStore.beginRepayment(selectedLine.id, amount);
+    setSrAnnouncement(`Submitting repayment of ${formatMoney(amount)}.`);
+
+    try {
+      const receipt = await submitRepayment({
+        opId: op.opId,
+        lineId: selectedLine.id,
         amount,
-        creditLineName: selectedLine.name,
-        creditLineId: selectedLine.id,
-        transactionId: `TXN-${Date.now()}`,
-        remainingDebt,
-        limit: selectedLine.limit,
-        apr: selectedLine.apr,
-        nextPaymentAmount: selectedLine.nextPaymentAmount,
-        timestamp: new Date().toISOString(),
-      },
-    });
-    setStep('success');
-    // Announce payment success immediately so SR users don't need to explore.
-    setSrAnnouncement(`Payment successful! You repaid ${formatMoney(amount)}.`);
+        utilizedAtSubmission: selectedLine.utilized,
+      });
+      repaymentStore.confirmRepayment(op.opId, receipt);
+      setAuthoritativeDebt(receipt.utilizedAfter);
+      navigate('/repay/success', {
+        state: {
+          amount,
+          creditLineName: selectedLine.name,
+          creditLineId: selectedLine.id,
+          transactionId:
+            receipt.transaction?.id ?? `TXN-${Date.now()}`,
+          remainingDebt: receipt.utilizedAfter,
+          limit: selectedLine.limit,
+          apr: selectedLine.apr,
+          nextPaymentAmount: selectedLine.nextPaymentAmount,
+          timestamp: receipt.updatedAt,
+        },
+      });
+      setStep('success');
+      // Announce payment success immediately so SR users don't need to explore.
+      setSrAnnouncement(`Payment successful! You repaid ${formatMoney(amount)}.`);
+    } catch (err) {
+      // Exactly-once rollback: restores the pre-submission balance even if
+      // this handler somehow runs twice (ref guard + store terminal states).
+      repaymentStore.failRepayment(op.opId);
+      const code =
+        err instanceof RepaymentRejectedError ? err.code : 'unknown';
+      const message = SUBMIT_ERROR_MESSAGES[code];
+      setSubmitError(message);
+      setSrAnnouncement(
+        `Repayment failed: ${message} Your balance was restored.`,
+      );
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+    }
   };
 
   const handleNewRepay = () => {
     setAmountStr('');
     setIsAutoSchedule(false);
+    setAuthoritativeDebt(null);
     setStep('input');
     setSrAnnouncement('Starting a new repayment. Select an amount.');
   };
@@ -357,7 +439,8 @@ export default function RepayPage() {
   }
 
   const oldPct = Math.round((selectedLine.utilized / selectedLine.limit) * 100);
-  const remainingDebt = validation?.remainingDebt ?? selectedLine.utilized;
+  const localRemaining = validation?.remainingDebt ?? selectedLine.utilized;
+  const remainingDebt = authoritativeDebt ?? localRemaining;
   const newPct = Math.round((remainingDebt / selectedLine.limit) * 100);
 
   return (
@@ -734,11 +817,35 @@ export default function RepayPage() {
               />
             )}
 
+            {submitError && (
+              <div
+                className={`flex items-start gap-2 rounded-lg p-3 text-sm ${SEVERITY_CONFIG.danger.patternClass}`}
+                style={{
+                  border: `1px solid ${SEVERITY_CONFIG.danger.border}`,
+                  background: SEVERITY_CONFIG.danger.bg,
+                  color: SEVERITY_CONFIG.danger.color,
+                }}
+                role="alert"
+              >
+                <span className="mt-0.5 inline-flex shrink-0">
+                  {SEVERITY_CONFIG.danger.icon}
+                </span>
+                <div>
+                  <p className="text-sm font-semibold">Repayment failed</p>
+                  <p className="mt-0.5 text-xs opacity-80">
+                    {submitError} Your balance was restored — you can retry
+                    safely.
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-3">
               <button
                 type="button"
                 onClick={handleBack}
-                className={`rp-back-input-btn flex-1 rounded-lg border border-border bg-surface px-4 py-3 text-sm font-semibold text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${motionClasses(isReducedMotionActive, 'transition-all hover:bg-border')}`}
+                disabled={isSubmitting}
+                className={`rp-back-input-btn flex-1 rounded-lg border border-border bg-surface px-4 py-3 text-sm font-semibold text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${motionClasses(isReducedMotionActive, 'transition-all hover:bg-border')}`}
               >
                 <span className="flex items-center justify-center gap-2">
                   Back <KbdHint keys={['Esc']} />
@@ -747,12 +854,16 @@ export default function RepayPage() {
               <button
                 type="button"
                 onClick={handleConfirm}
-                disabled={isConfirmDisabled}
-                aria-disabled={isConfirmDisabled || undefined}
+                disabled={isConfirmDisabled || isSubmitting}
+                aria-disabled={isConfirmDisabled || isSubmitting || undefined}
+                aria-busy={isSubmitting || undefined}
                 className={`rp-confirm-btn flex-[2] rounded-lg bg-accent px-4 py-3 text-sm font-semibold text-background focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50 ${motionClasses(isReducedMotionActive, 'transition-all hover:brightness-110')}`}
               >
                 <span className="flex items-center justify-center gap-2">
-                  Confirm Repayment <KbdHint keys={['Enter']} />
+                  {isSubmitting
+                    ? 'Submitting…'
+                    : 'Confirm Repayment'}
+                  {!isSubmitting && <KbdHint keys={['Enter']} />}
                 </span>
               </button>
             </div>
