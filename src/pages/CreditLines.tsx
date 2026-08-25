@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState, useMemo, useSyncExternalStore } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { StatusBadge } from "../components/StatusBadge";
 import { CreditLineRowMenu } from "../components/CreditLineRowMenu";
@@ -9,12 +9,14 @@ import { NoLines } from "../components/illustrations";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useInertBackdrop } from "../hooks/useInertBackdrop";
 import { useBodyScrollLock } from "../hooks/useBodyScrollLock";
-import { MOCK_CREDIT_LINES } from "../data/mockData";
 import type {
+  CreditLine,
   CreditLineStatus,
   SortField,
   SortDirection,
 } from "../types/creditLine";
+import { creditLineCache } from "../state/creditLineCache";
+import { submitLineStatusChange } from "../services/creditLineAdminService";
 import type { CollateralAsset } from "../types/collateral";
 import {
   HealthFactorChart,
@@ -58,11 +60,11 @@ function CreditLineCard({
   onFreeze,
   onUnfreeze,
 }: {
-  line: (typeof MOCK_CREDIT_LINES)[0];
+  line: CreditLine;
   isSelected: boolean;
   onToggle: () => void;
   onSwapCollateral?: (
-    line: (typeof MOCK_CREDIT_LINES)[0],
+    line: CreditLine,
     triggerRef: React.RefObject<HTMLButtonElement | null>,
   ) => void;
   onRepay?: () => void;
@@ -293,7 +295,16 @@ export default function CreditLines({ defaultLoading = true }: { defaultLoading?
   );
   const [announcement, setAnnouncement] = useState("");
 
-  const [creditLines, setCreditLines] = useState(MOCK_CREDIT_LINES);
+  // Credit lines come from the authoritative cache (issue #919): mutations
+  // apply optimistically, then reconcile against post-index backend data.
+  const creditLines = useSyncExternalStore(
+    creditLineCache.subscribe,
+    creditLineCache.getLines,
+  );
+  const refreshIndicator = useSyncExternalStore(
+    creditLineCache.subscribe,
+    creditLineCache.getRefreshIndicator,
+  );
   const [isLoading, setIsLoading] = useState(true);
   const hasCreditLines = creditLines.length > 0;
 
@@ -310,7 +321,7 @@ export default function CreditLines({ defaultLoading = true }: { defaultLoading?
   const [selectedLines, setSelectedLines] = useState<string[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [modalTarget, setModalTarget] = useState<{
-    line: (typeof MOCK_CREDIT_LINES)[0];
+    line: CreditLine;
     currentAsset: string;
     triggerRef: React.RefObject<HTMLButtonElement | null>;
   } | null>(null);
@@ -320,7 +331,7 @@ export default function CreditLines({ defaultLoading = true }: { defaultLoading?
     setModalTarget(null);
   };
   const handleSwapCollateral = (
-    line: (typeof MOCK_CREDIT_LINES)[0],
+    line: CreditLine,
     triggerRef: React.RefObject<HTMLButtonElement | null>,
   ) => {
     setModalTarget({
@@ -334,51 +345,74 @@ export default function CreditLines({ defaultLoading = true }: { defaultLoading?
     navigate(`/repay?line=${lineId}`);
   };
 
+  /**
+   * Shared optimistic status-change flow (issue #919):
+   *  1. Apply the new status locally and remember the pre-mutation baseline.
+   *  2. Submit the write; on confirmation mark the affected line stale and
+   *     refresh it authoritatively (backend indexes asynchronously).
+   *  3. On rejection roll the optimistic change back exactly once.
+   * Unrelated lines keep their cached values throughout.
+   */
+  const handleStatusChange = (
+    lineId: string,
+    nextStatus: "Frozen" | "Active",
+    pastTense: string,
+    note: string,
+  ) => {
+    const target = creditLineCache.getLine(lineId);
+    if (!target) return;
+
+    const nowIso = new Date().toISOString();
+    const token = creditLineCache.applyOptimistic(lineId, (l) => {
+      if (nextStatus === "Frozen") {
+        return {
+          ...l,
+          status: "Frozen" as const,
+          updatedAt: nowIso,
+          statusHistory: [
+            ...l.statusHistory,
+            { status: "Frozen" as const, date: nowIso, note },
+          ],
+        };
+      }
+      const lastNonFrozen = l.statusHistory
+        .filter((s) => s.status !== "Frozen")
+        .pop();
+      const restoredStatus = lastNonFrozen?.status || "Active";
+      return {
+        ...l,
+        status: restoredStatus,
+        updatedAt: nowIso,
+        statusHistory: [
+          ...l.statusHistory,
+          { status: restoredStatus, date: nowIso, note },
+        ],
+      };
+    });
+
+    setAnnouncement(`Credit line ${target.name} ${pastTense}.`);
+
+    submitLineStatusChange({ lineId, nextStatus })
+      .then(() => {
+        creditLineCache.invalidate([lineId]);
+        creditLineCache.refreshAffected([lineId]);
+      })
+      .catch(() => {
+        const rolledBack = creditLineCache.rollbackOptimistic(token);
+        if (rolledBack.applied) {
+          setAnnouncement(
+            `Could not save the change to ${target.name}. Previous balance restored.`,
+          );
+        }
+      });
+  };
+
   const handleFreeze = (lineId: string) => {
-    const lineToFreeze = creditLines.find((cl) => cl.id === lineId);
-    if (lineToFreeze) {
-      setAnnouncement(`Credit line ${lineToFreeze.name} frozen.`);
-    }
-    setCreditLines((prev) =>
-      prev.map((cl) =>
-        cl.id === lineId
-          ? {
-              ...cl,
-              status: 'Frozen' as const,
-              updatedAt: new Date().toISOString(),
-              statusHistory: [
-                ...cl.statusHistory,
-                { status: 'Frozen' as const, date: new Date().toISOString(), note: 'Frozen by user' },
-              ],
-            }
-          : cl,
-      ),
-    );
+    handleStatusChange(lineId, "Frozen", "frozen", "Frozen by user");
   };
 
   const handleUnfreeze = (lineId: string) => {
-    const lineToUnfreeze = creditLines.find((cl) => cl.id === lineId);
-    if (lineToUnfreeze) {
-      setAnnouncement(`Credit line ${lineToUnfreeze.name} unfrozen.`);
-    }
-    setCreditLines((prev) =>
-      prev.map((cl) => {
-        if (cl.id !== lineId) return cl;
-        const lastNonFrozen = cl.statusHistory
-          .filter((s) => s.status !== 'Frozen')
-          .pop();
-        const restoredStatus = lastNonFrozen?.status || 'Active';
-        return {
-          ...cl,
-          status: restoredStatus,
-          updatedAt: new Date().toISOString(),
-          statusHistory: [
-            ...cl.statusHistory,
-            { status: restoredStatus, date: new Date().toISOString(), note: 'Unfrozen by user' },
-          ],
-        };
-      }),
-    );
+    handleStatusChange(lineId, "Active", "unfrozen", "Unfrozen by user");
   };
 
   const handleSchedule = (lineId: string) => {
@@ -693,6 +727,12 @@ export default function CreditLines({ defaultLoading = true }: { defaultLoading?
       </div>
 
       <LiveRegion message={announcement} id="cl-live-region" />
+
+      {refreshIndicator.isRefreshing && (
+        <p className="cl-refresh-indicator" role="status">
+          Updating balances from the ledger…
+        </p>
+      )}
       {showCompare && selectedCreditLines.length === 2 && (
         <div
           id="compare-lines-drawer"
