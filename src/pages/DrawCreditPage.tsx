@@ -30,9 +30,12 @@
 
 import { useRef, useState, useEffect, useCallback } from "react";
 import { Skeleton } from "@/components/Skeleton";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useReducedMotion } from "@/context/ReducedMotionContext";
 import { loadDraft, saveDraft, clearDraft } from "@/state/wizardDraft";
+import { readJson, writeJson } from "@/utils/storage";
+import { DEFAULT_RISK_ACK_KEY, GRANTFOX_RISK_EDUCATION_ACK_KEY } from "@/constants/storageKeys";
+import { DefaultRiskModal } from "@/components/DefaultRiskModal";
 import { CreditLineSelector } from "@/components/CreditLineSelector";
 import { AmountInput } from "@/components/AmountInput";
 import { PreviewSection } from "@/components/PreviewSection";
@@ -75,6 +78,37 @@ function isFocusedOnInput(): boolean {
 export default function DrawCreditPage() {
   const navigate = useNavigate();
   const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const isLearnMode = searchParams.get("learn") === "1";
+
+  const [isRiskModalOpen, setIsRiskModalOpen] = useState(() => {
+    if (isLearnMode) return true;
+    const isAck =
+      readJson<boolean>(DEFAULT_RISK_ACK_KEY, false) ||
+      readJson<boolean>(GRANTFOX_RISK_EDUCATION_ACK_KEY, false);
+    return !isAck;
+  });
+
+  useEffect(() => {
+    if (isLearnMode) {
+      setIsRiskModalOpen(true);
+    }
+  }, [isLearnMode]);
+
+  const handleRiskModalAcknowledge = useCallback(() => {
+    if (isLearnMode) {
+      // In learn mode, strip ?learn=1 from URL without adding history entry and do NOT overwrite localStorage
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("learn");
+      setSearchParams(nextParams, { replace: true });
+    } else {
+      // First-time borrower gate: record acknowledgment in localStorage
+      writeJson(DEFAULT_RISK_ACK_KEY, true);
+      writeJson(GRANTFOX_RISK_EDUCATION_ACK_KEY, true);
+    }
+    setIsRiskModalOpen(false);
+  }, [isLearnMode, searchParams, setSearchParams]);
+
   const { queueAction } = useOnline();
   const routeTransaction = location.state?.transaction as Transaction | undefined;
   const draftState = routeTransaction ? null : loadDraft();
@@ -241,7 +275,7 @@ export default function DrawCreditPage() {
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isFocusedOnInput()) return;
+      if (isRiskModalOpen || isFocusedOnInput()) return;
 
       switch (e.key) {
         case "Escape":
@@ -284,10 +318,14 @@ export default function DrawCreditPage() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [step, amount, confirmationAcknowledged, handleBack, handleCancel]);
+  }, [step, amount, confirmationAcknowledged, handleBack, handleCancel, isRiskModalOpen]);
 
   return (
     <main className="dc-page" aria-label="Draw credit">
+      <DefaultRiskModal
+        isOpen={isRiskModalOpen}
+        onAcknowledge={handleRiskModalAcknowledge}
+      />
       <LiveRegion
         id="draw-wizard-progress-announcement"
         message={microProgressAnnouncement}

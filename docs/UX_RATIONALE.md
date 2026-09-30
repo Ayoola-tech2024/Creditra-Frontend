@@ -362,3 +362,21 @@ alarming except on danger-state validation messages.
 **Trade-off.** The glossary is a documentation artefact that must be kept in
 sync with the code. We accept this because the alternative — inconsistent
 terminology appearing over time — is worse for users and contributors alike.
+
+---
+
+## 13. Non-dismissible default-risk education gate before first draw
+
+**Problem.** First-time borrowers taking on credit lines may not fully comprehend the legal, financial, and credit implications of defaulting on an adaptive on-chain credit protocol. Without explicit education, borrowers face unexpected account suspension, credit score downgrades, or liquidation mechanisms. For the GrantFox credit campaign, borrower protection requires that every user understand the definition, consequences, and avoidance strategies of default before their first draw.
+
+**Alternatives considered.**
+
+- **Dismissible banner or inline informational card.** Rejected — users routinely glance past dismissible banners without reading. A dismissible banner provides no guarantee that the borrower saw and understood critical default consequences before drawing funds.
+- **Skip button or backdrop click dismissal.** Rejected — allowing users to bypass the steps defeats the compliance and borrower-protection objective. A user must progress through all three steps (definition, consequences, prevention) in sequential order.
+- **Requiring education during wallet connection / onboarding.** Rejected — wallet connection is too early; the user may merely be exploring credit lines without taking out debt. Presenting default education at the moment of draw puts the guidance in immediate context when it is directly relevant.
+
+**Chosen approach.** A dedicated 3-step modal dialog (`DefaultRiskModal.tsx`) that mounts on `/draw-credit` before the draw wizard when `creditra.default_risk_ack` is absent from `localStorage`. The modal is explicitly non-dismissible: backdrop clicks and Escape key presses are ignored, the Back button is disabled on step 1, and only clicking "I Understand – Proceed" on step 3 commits the acknowledgement to `localStorage` and unlocks the wizard.
+To support ongoing education, support agents, documentation, and campaign links can re-trigger the flow for any returning user at any time using the `?learn=1` URL query parameter. In learn mode, completing the flow removes `?learn=1` from the address bar (via `history.replaceState` behavior) without modifying existing storage flags.
+
+**Trade-off.** Enforces a mandatory interaction roadblock for first-time borrowers. We deliberately accept this friction because borrower default protection and informed consent outweigh a one-time 3-step reading delay.
+
