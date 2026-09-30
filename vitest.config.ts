@@ -26,4 +26,9 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     timeout: 10000,
   },
+  server: {
+    fs: {
+      strict: false,
+    },
+  },
 });

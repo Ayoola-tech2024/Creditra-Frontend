@@ -343,6 +343,96 @@ describe('RepayPage — copy-to-clipboard buttons (FWC26)', () => {
     });
     expect(btn).toHaveAttribute('data-copy-state', 'idle');
   });
+
+  describe('Issue #1140 — global Enter handler and duplicate-submit lock', () => {
+    it('Enter on a focused Back button triggers only that button action and does not advance to review', () => {
+      renderPage(['/repay?line=CL-2024-001']);
+      fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
+
+      const backBtn = screen.getByRole('button', { name: /back/i });
+      backBtn.focus();
+      expect(document.activeElement).toBe(backBtn);
+
+      fireEvent.keyDown(backBtn, { key: 'Enter', bubbles: true });
+
+      expect(screen.queryByText(/review your repayment/i)).not.toBeInTheDocument();
+      expect(screen.getByText(/repay credit/i)).toBeInTheDocument();
+    });
+
+    it('Enter on a focused Back button on review step goes back and does not call confirm', () => {
+      renderPage(['/repay?line=CL-2024-001']);
+      fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
+      fireEvent.click(screen.getByRole('button', { name: /review repayment/i }));
+      expect(screen.getByText(/review your repayment/i)).toBeInTheDocument();
+
+      const backToInputBtn = screen.getByRole('button', { name: /back to input/i });
+      backToInputBtn.focus();
+      expect(document.activeElement).toBe(backToInputBtn);
+
+      fireEvent.click(backToInputBtn);
+      fireEvent.keyDown(backToInputBtn, { key: 'Enter', bubbles: true });
+
+      expect(screen.queryByText(/you repaid/i)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /review repayment/i })).toBeInTheDocument();
+    });
+
+    it('Enter with focus on the page body still advances from input to review, and from review to success', () => {
+      renderPage(['/repay?line=CL-2024-001']);
+      fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
+
+      document.body.focus();
+
+      fireEvent.keyDown(window, { key: 'Enter', bubbles: true, target: document.body });
+
+      expect(screen.getByText(/review your repayment/i)).toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: 'Enter', bubbles: true, target: document.body });
+
+      expect(screen.getByRole('heading', { name: /you repaid/i })).toBeInTheDocument();
+    });
+
+    it('Enter on Confirm Repayment button does not double-fire handleConfirm (isSubmitting lock)', () => {
+      renderPage(['/repay?line=CL-2024-001']);
+      fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
+      fireEvent.click(screen.getByRole('button', { name: /review repayment/i }));
+
+      const confirmBtn = screen.getByRole('button', { name: /confirm repayment/i });
+      confirmBtn.focus();
+
+      fireEvent.click(confirmBtn);
+      fireEvent.keyDown(confirmBtn, { key: 'Enter', bubbles: true });
+
+      expect(screen.getByRole('heading', { name: /you repaid/i })).toBeInTheDocument();
+    });
+
+    it('ignores Enter keydown if event.defaultPrevented is true', () => {
+      renderPage(['/repay?line=CL-2024-001']);
+      fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
+
+      const evt = new KeyboardEvent('keydown', { key: 'Enter', cancelable: true, bubbles: true });
+      evt.preventDefault();
+      window.dispatchEvent(evt);
+
+      expect(screen.queryByText(/review your repayment/i)).not.toBeInTheDocument();
+    });
+
+    it('ignores keydown events inside dialog elements', () => {
+      renderPage(['/repay?line=CL-2024-001']);
+      fireEvent.click(screen.getByRole('button', { name: /smart pay/i }));
+
+      const dialog = document.createElement('div');
+      dialog.setAttribute('role', 'dialog');
+      const dialogBtn = document.createElement('button');
+      dialog.appendChild(dialogBtn);
+      document.body.appendChild(dialog);
+
+      fireEvent.keyDown(dialogBtn, { key: 'Enter', bubbles: true });
+
+      expect(screen.queryByText(/review your repayment/i)).not.toBeInTheDocument();
+
+      document.body.removeChild(dialog);
+    });
+  });
 });
 
 /**
