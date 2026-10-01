@@ -50,6 +50,9 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import DrawCreditPage from "./DrawCreditPage";
 import { DrawCreditPageSkeleton } from "./DrawCreditPage";
+import { DEFAULT_RISK_ACK_KEY } from "@/constants/storageKeys";
+import { readJson, writeJson } from "@/utils/storage";
+import { __getMockSearch, __setMockLocation } from "react-router-dom";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -98,6 +101,8 @@ describe("DrawCreditPage — step navigation & token audit", () => {
     // draft left over from a previous test would make a freshly-mounted
     // instance resume mid-flow instead of at "select".
     localStorage.clear();
+    localStorage.setItem("creditra.default_risk_ack", "true");
+    __setMockLocation("/draw-credit");
   });
 
   // ── 1. Default render ────────────────────────────────────────────────────
@@ -468,6 +473,8 @@ describe("DrawCreditPage — step navigation & token audit", () => {
 describe("DrawCreditPage — keyboard shortcut hints", () => {
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem("creditra.default_risk_ack", "true");
+    __setMockLocation("/draw-credit");
   });
 
   // ── K1. Select step: shortcut bar present ─────────────────────────────────
@@ -536,7 +543,7 @@ describe("DrawCreditPage — keyboard shortcut hints", () => {
     const { user } = setup();
     await goToConfirmStep(user);
 
-    expect(screen.getByRole("heading", { name: /review & confirm/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /review (&|and) confirm/i })).toBeInTheDocument();
 
     fireEvent.keyDown(document.body, { key: "ArrowLeft", code: "ArrowLeft" });
 
@@ -553,11 +560,11 @@ describe("DrawCreditPage — keyboard shortcut hints", () => {
     await user.type(screen.getByRole("spinbutton"), "500");
 
     // Blur the input so it's no longer focused
-    fireEvent.blur(screen.getByRole("spinbutton"));
+    screen.getByRole("spinbutton").blur();
 
     fireEvent.keyDown(document.body, { key: "ArrowRight", code: "ArrowRight" });
 
-    expect(screen.getByRole("heading", { name: /review & confirm/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /review (&|and) confirm/i })).toBeInTheDocument();
   });
 
   // ── K7. Escape on select step fires navigation cancel ────────────────────
@@ -590,7 +597,7 @@ describe("DrawCreditPage — keyboard shortcut hints", () => {
     const { user } = setup();
     await goToConfirmStep(user);
 
-    expect(screen.getByRole("heading", { name: /review & confirm/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /review (&|and) confirm/i })).toBeInTheDocument();
 
     fireEvent.keyDown(document.body, { key: "Escape", code: "Escape" });
 
@@ -672,6 +679,8 @@ describe("DrawCreditPage — keyboard shortcut hints", () => {
 describe("DrawCreditPage — duplicate submission guard", () => {
   beforeEach(() => {
     localStorage.clear();
+    localStorage.setItem("creditra.default_risk_ack", "true");
+    __setMockLocation("/draw-credit");
   });
 
   it("double-clicking Confirm creates exactly one transaction", async () => {
@@ -688,7 +697,7 @@ describe("DrawCreditPage — duplicate submission guard", () => {
       // the second must be rejected by the in-flight guard.
       fireEvent.click(confirmBtn);
       fireEvent.click(confirmBtn);
-      vi.advanceTimersByTime(2000);
+      await vi.advanceTimersByTimeAsync(2000);
     });
 
     // Exactly one submission reaches the simulated network and produces a
@@ -718,7 +727,7 @@ describe("DrawCreditPage — duplicate submission guard", () => {
         key: "ArrowRight",
         code: "ArrowRight",
       });
-      vi.advanceTimersByTime(2000);
+      await vi.advanceTimersByTimeAsync(2000);
     });
 
     expect(randomSpy).toHaveBeenCalledTimes(1);
@@ -741,7 +750,7 @@ describe("DrawCreditPage — duplicate submission guard", () => {
       fireEvent.click(
         screen.getByRole("button", { name: /confirm draw/i }),
       );
-      vi.advanceTimersByTime(2000);
+      await vi.advanceTimersByTimeAsync(2000);
     });
 
     expect(
@@ -760,6 +769,84 @@ describe("DrawCreditPage — duplicate submission guard", () => {
     ).toBeInTheDocument();
 
     randomSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests — default-risk education gate (GrantFox Campaign / REQ-6.2)
+// ---------------------------------------------------------------------------
+
+describe("DrawCreditPage — default-risk education gate (REQ-6.2)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    window.scrollTo = vi.fn();
+    __setMockLocation("/draw-credit");
+  });
+
+  it("modal is shown when creditra.default_risk_ack is absent from localStorage", () => {
+    render(<DrawCreditPage />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("What is a Default?")).toBeInTheDocument();
+  });
+
+  it("modal is NOT shown when creditra.default_risk_ack is true in localStorage", () => {
+    writeJson(DEFAULT_RISK_ACK_KEY, true);
+    render(<DrawCreditPage />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /select credit line/i })).toBeInTheDocument();
+  });
+
+  it("modal IS shown when URL contains ?learn=1 even if localStorage key is set", () => {
+    writeJson(DEFAULT_RISK_ACK_KEY, true);
+    __setMockLocation("/draw-credit", "?learn=1");
+    render(<DrawCreditPage />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByText("What is a Default?")).toBeInTheDocument();
+  });
+
+  it("acknowledging the modal sets creditra.default_risk_ack in localStorage", () => {
+    render(<DrawCreditPage />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Step 1 -> Step 2
+    fireEvent.click(screen.getByRole("button", { name: /^next$/i }));
+    // Step 2 -> Step 3
+    fireEvent.click(screen.getByRole("button", { name: /^next$/i }));
+
+    // Click "I Understand – Proceed"
+    const confirmBtn = screen.getByRole("button", { name: /i understand/i });
+    fireEvent.click(confirmBtn);
+
+    // Modal is dismissed and wizard is shown
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /select credit line/i })).toBeInTheDocument();
+
+    // localStorage updated
+    expect(readJson(DEFAULT_RISK_ACK_KEY, false)).toBe(true);
+  });
+
+  it("acknowledging in ?learn=1 mode removes the query param but does not re-write localStorage", () => {
+    expect(readJson(DEFAULT_RISK_ACK_KEY, false)).toBe(false);
+
+    __setMockLocation("/draw-credit", "?learn=1");
+    render(<DrawCreditPage />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Advance to step 3
+    fireEvent.click(screen.getByRole("button", { name: /^next$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^next$/i }));
+
+    // Acknowledge in learn mode
+    fireEvent.click(screen.getByRole("button", { name: /i understand/i }));
+
+    // Modal is dismissed
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // Query parameter ?learn=1 removed
+    expect(__getMockSearch()).not.toContain("learn=1");
+
+    // localStorage key was NOT written
+    expect(readJson(DEFAULT_RISK_ACK_KEY, false)).toBe(false);
   });
 });
 

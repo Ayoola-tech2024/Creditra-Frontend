@@ -90,7 +90,26 @@ export function Navigate(_props: Record<string, unknown>) {
 
 export function useSearchParams() {
   const params = new URLSearchParams(currentSearch);
-  return [params, (_: URLSearchParams) => {}] as const;
+  const setSearchParams = (
+    next: URLSearchParams | string | Record<string, string>,
+    _opts?: { replace?: boolean }
+  ) => {
+    if (next instanceof URLSearchParams) {
+      const s = next.toString();
+      currentSearch = s ? `?${s}` : '';
+    } else if (typeof next === 'string') {
+      currentSearch = next ? (next.startsWith('?') ? next : `?${next}`) : '';
+    } else if (next && typeof next === 'object') {
+      const sp = new URLSearchParams(next);
+      const s = sp.toString();
+      currentSearch = s ? `?${s}` : '';
+    }
+  };
+  return [params, setSearchParams] as const;
+}
+
+export function __getMockSearch() {
+  return currentSearch;
 }
 
 export function useNavigate() {
