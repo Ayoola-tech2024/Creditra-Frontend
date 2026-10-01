@@ -108,6 +108,7 @@ export default function RepayPage() {
   // router context (outside React 18 batching), causing the persist effect
   // to fire with the old step before setStep('success') is applied.
   const draftClearedRef = useRef(false);
+  const isSubmittingRef = useRef(false);
 
   const [step, setStep] = useState<RepayStep>('input');
   const [selectedId, setSelectedId] = useState<string>(preselectedId ?? '');
@@ -192,6 +193,9 @@ export default function RepayPage() {
   };
 
   const handleConfirm = () => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+
     draftClearedRef.current = true;
     clearRepayDraft();
     navigate('/repay/success', {
@@ -215,9 +219,12 @@ export default function RepayPage() {
       offlineMessage:
         'You are offline, so this repayment cannot be processed yet. It has been queued and will be submitted when your connection is restored.',
     });
+    setStep('success');
+    setSrAnnouncement(`Payment successful! You repaid ${formatMoney(amount)}.`);
   };
 
   const handleNewRepay = () => {
+    isSubmittingRef.current = false;
     draftClearedRef.current = true;
     clearRepayDraft();
     setAmountStr('');
@@ -227,6 +234,7 @@ export default function RepayPage() {
   };
 
   const handleBack = useCallback(() => {
+    isSubmittingRef.current = false;
     if (step === 'review') {
       setStep('input');
       setSrAnnouncement('Back to input step. Edit your repayment amount.');
@@ -311,10 +319,17 @@ export default function RepayPage() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
+
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
         if (e.key === 'Escape') {
           e.target.blur();
         }
+        return;
+      }
+
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('button, a, select, dialog, [role="dialog"]')) {
         return;
       }
 
